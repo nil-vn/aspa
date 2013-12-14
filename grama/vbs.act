@@ -1,0 +1,609 @@
+@header :
+/*
+    This file is part of Aspa.
+
+    Aspa is free software; you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation; either version 2 of the License, or
+    (at your option) any later version.
+
+    Aspa is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with Aspa; if not, write to the Free Software
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+*/
+package gr.omadak.leviathan.asp;
+import java.util.Set;
+import java.util.Map;
+import java.util.TreeMap;
+import java.util.Collections;
+import java.util.List;
+import java.util.Iterator;
+import java.util.ArrayList;
+import java.util.TreeSet;
+import gr.omadak.leviathan.asp.objects.VbUserDefinedMethod;
+import gr.omadak.leviathan.asp.objects.VbUserDefinedProperty;
+import gr.omadak.leviathan.asp.objects.Member;
+import gr.omadak.leviathan.asp.objects.Property;
+import gr.omadak.leviathan.asp.objects.Method;
+import gr.omadak.leviathan.asp.objects.GenericASPProperty;
+import gr.omadak.leviathan.asp.objects.GenericMethod;
+import gr.omadak.leviathan.asp.objects.XmlASPClass;
+import org.apache.log4j.Logger;
+
+@tokens :
+    AND; CALL; CASE; CONST; DIM; DO; EACH; ELSE; ELSEIF;
+    EMPTY; END; EQV; ERASE; ERROR; EXIT; EXPLICIT; FALSE;
+    FOR; FUNCTION; IF; IS; IMP; IN; LOOP; MOD; NEXT; NOT;
+    NOTHING; NULL; ON; OPTION; OR; REDIM; REM; RESUME;
+    SELECT; SET; STEP; SUB; THEN; TO; TRUE; WEND; WHILE;
+    WITH; XOR; UNTIL; CLASS; PUBLIC; PRIVATE; DEFAULT; PROPERTY;
+    LET; GET; BYREF; BYVAL; NEW; RANDOMIZE; PRESERVE;
+
+    STATEMENT_END; EXPR; EQ; UNARY_PLUS; UNARY_MINUS; ARGLIST; ZERO;
+    ARGLIST_VALUES; SUB_CALL; METHOD_CALL;
+    DINT; DFLOAT; DOT; CONCAT; IF_ELSE;
+    SUB_NAME; CASE_ELSE; WHILE_WEND; CASE_LIST;
+    HTML; EQ_HTML; PROPERTY_GET; PROPERTY_LET; PROPERTY_SET;
+    WITH_DOT; ASP; INDEX_OP; INDEX_LIST; DO_UNTIL; DO_WHILE;
+    FOR_INIT; INCLUDE; EXIT_PROPERTY; ARRAY; GOTO;
+    DIMENSION_LENGTH; REDIM_PRESERVE;
+
+
+@init : {
+    private boolean inWith;
+    private int withCount = 0;
+    private Set arrays = new TreeSet();
+    private Set globalArrays = arrays;
+    private String lastId;
+    private List functions;
+    private List args;
+	private List classes;
+    private Set globalIds = new TreeSet();
+	private XmlASPClass currentClass;
+    private VbUserDefinedMethod currentFunction;
+
+    private static Logger LOG = Logger.getLogger(VbsParser.class);
+
+    private VbUserDefinedMethod getFunction(String name) {
+        VbUserDefinedMethod result = null;
+        if (currentClass != null) {
+            for (Iterator it = currentClass.getMemberList(name).iterator();
+            it.hasNext();) {
+                Member mem = (Member) it.next();
+                if (mem instanceof VbUserDefinedMethod) {
+                    result = (VbUserDefinedMethod) mem;
+                    break;
+                }
+            }
+        }
+        if (result == null && functions != null) {
+            for (Iterator it = functions.iterator(); it.hasNext();) {
+                VbUserDefinedMethod method = (VbUserDefinedMethod) it.next();
+                if (name.equals(method.getName())) {
+                    result = method;
+                    break;
+                }
+            }
+        }
+        return result;
+    }
+
+
+    private void addMethod(String name) {
+        List arguments = args == null ? Collections.EMPTY_LIST : args;
+        args = null;
+        currentFunction = new VbUserDefinedMethod(name, arguments,
+        false, false);
+        if (currentClass != null) {
+            currentClass.addMember(currentFunction);
+        } else {
+            if (functions == null) {
+                functions = new ArrayList();
+            }
+            functions.add(currentFunction);
+        }
+    }
+
+
+    public List getFunctions() {
+		return functions;
+	}
+
+
+	public List getClasses() {
+		return classes;
+	}
+
+
+    public Set getGlobalIds() {
+        return globalIds;
+    }
+
+
+    private Property createIdProperty(String name) {
+        AST read = #(#[DOT, "DOT"], #[CommonConstants.INSTANCE],
+        #[IDENTIFIER, name]);
+        AST write = #(#[ASSIGN, "="],
+        #(#[DOT, "DOT"], #[CommonConstants.INSTANCE], #[IDENTIFIER, name]),
+        #[CommonConstants.TEMPLATE, "1"]);
+        return new GenericASPProperty(name, read, write, -1);
+    }
+
+
+    private Property createArrayProperty(AST root) {
+        /*
+        String name = root.getText();
+        AST fChild = root.getFirstChild();
+        int count = 0;
+        while (fChild != null) {
+            count++;
+            fChild = fChild.getNextSibling();
+        }
+        */
+        return createIdProperty(root.getText());
+    }
+
+
+    private void addDim(AST node) {
+        currentClass.addMember(#node.getFirstChild() == null
+        ? createIdProperty(#node.getText())
+        : createArrayProperty(#node));
+    }
+}
+
+@check_id : {
+    if (#left.getType() == IDENTIFIER && currentFunction == null) {
+        globalIds.add(#left.getText());
+    }
+}
+
+
+@goto_int : {
+      int dVal = Integer.parseInt(#d.getText());
+      if (dVal != 0) {
+          throw new RecognitionException("Expected 0 instead of :"
+          + dVal + " in the GOTO rule!");
+      }
+      #d.setType(ZERO);
+}
+
+@add_array : {
+    #id.setType(ARRAY);
+    arrays.add(#id.getText());
+}
+
+@dimen_length : {
+  ## =#(#[EXPR, "EXPR"], ##);
+}
+
+@expr_statement : { ## = #e; }
+@expr_statement_list : {
+    if (#e.getFirstChild().getType() == ASSIGN) {
+        AST mCall = e_AST.getFirstChild().getFirstChild().getNextSibling();
+        mCall = #([METHOD_CALL, "METHOD_CALL"], mCall, #el);
+        #e.getFirstChild().getFirstChild().setNextSibling(mCall);
+        ## = #e;
+    } else {
+        ## = #([SUB_CALL, "Sub Call"], e_AST.getFirstChild(), #el);
+    }
+}
+@call_end : {
+	if (#exList != null) {
+		## = #([SUB_CALL, "Sub Call"], ##, #exList);
+	} else {
+		## = #([SUB_CALL, "Sub Call"], ##);
+	}
+}
+
+@class_init: {List properties = new ArrayList();}
+@class_start : {
+	#IDENTIFIER.setType(CLASS);
+    String name = #IDENTIFIER.getText();
+    int id = IDENTIFIER;
+    currentClass = new XmlASPClass(name);
+    currentClass.addConstructor(new GenericMethod(name, CommonConstants.OBJECT,
+    Collections.EMPTY_LIST, #([NEW, "new"], [id, name])));
+    if (classes == null) {
+		classes = new ArrayList();
+	}
+	classes.add(currentClass);
+}
+@class_end : {
+    for (Iterator it = currentClass.getProperties(); it.hasNext();) {
+        Object obj = it.next();
+        if (obj instanceof VbUserDefinedProperty) {
+            VbUserDefinedProperty prop = (VbUserDefinedProperty) obj;
+            String name = prop.getName();
+            if (!Character.isUpperCase(name.charAt(0))) {
+                name = name.substring(0, 1).toUpperCase()
+                + name.substring(1);
+            }
+            Method method = prop.getGet();
+            if (method != null) {
+                if (currentClass.getMemberObject("get" + name) != null) {
+                    method.setName("propGet" + name);
+                } else {
+                    method.setName("get" + name);
+                }
+            }
+            method = prop.getLet();
+            if (method != null) {
+                if (prop.hasSet()
+                || currentClass.getMemberObject("set" + name) != null) {
+                    method.setName("propLet" + name);
+                } else {
+                    method.setName("set" + name);
+                }
+            }
+            method = prop.getSet();
+            if (method != null) {
+                if (prop.hasLet()
+                || currentClass.getMemberObject("set" + name) != null) {
+                    method.setName("propSet" + name);
+                } else {
+                    method.setName("set" + name);
+                }
+            }
+        }
+    }
+    currentClass = null;
+    if (!properties.isEmpty()) {
+        AST id = #IDENTIFIER;
+        AST fChild = id.getFirstChild();
+        if (fChild == null) {
+            properties.add(0, #IDENTIFIER);
+            ## = astFactory.make((AST[]) properties.toArray(new AST[0]));
+        } else {
+            while (fChild.getNextSibling() != null) {
+                fChild = fChild.getNextSibling();
+            }
+            properties.add(0, null);
+            AST all = astFactory.make((AST[]) properties.toArray(new AST[0]));
+            fChild.setNextSibling(all);
+        }
+    }
+}
+@add_prop : {
+    if (#p1 != null) { //private or default
+        Member mem = currentClass.getMemberObject(#p2.getText());
+        if (mem != null && mem instanceof VbUserDefinedProperty) {
+            VbUserDefinedProperty vbProp = (VbUserDefinedProperty) mem;
+            vbProp.setPrivate(#p1.getType() == PRIVATE);
+            vbProp.setDefault(#p1.getType() == DEFAULT);
+        }
+    }
+    properties.add(#p2);
+}
+@append_prop : {
+    properties.add(#p3);
+}
+
+@prop_get : {
+	#IDENTIFIER.setType(PROPERTY_GET);
+    List arguments = args == null ? Collections.EMPTY_LIST : args;
+    args = null;
+    VbUserDefinedMethod method = new VbUserDefinedMethod(#IDENTIFIER.getText(),
+    arguments, false, false);
+	Member mem = currentClass.getMemberObject(#IDENTIFIER.getText());
+    if (mem instanceof VbUserDefinedProperty) {
+        ((VbUserDefinedProperty) mem).setGetMethod(method);
+    } else if (mem == null) {
+        VbUserDefinedProperty prop = new VbUserDefinedProperty();
+        prop.setName(#IDENTIFIER.getText());
+        prop.setGetMethod(method);
+        currentClass.addMember(prop);
+    } else {
+        LOG.error("member with name:" + #IDENTIFIER.getText() + " exists and is"
+        + " instance of:" + mem.getClass().getName());
+    }
+}
+@prop_let : {
+    #IDENTIFIER.setType(PROPERTY_LET);
+    List arguments = args == null ? Collections.EMPTY_LIST : args;
+    args = null;
+	VbUserDefinedMethod method = new VbUserDefinedMethod(#IDENTIFIER.getText(),
+    arguments, false, false);
+	Member mem = currentClass.getMemberObject(#IDENTIFIER.getText());
+    if (mem instanceof VbUserDefinedProperty) {
+        ((VbUserDefinedProperty) mem).setLetMethod(method);
+    } else if (mem == null) {
+        VbUserDefinedProperty prop = new VbUserDefinedProperty();
+        prop.setName(#IDENTIFIER.getText());
+        prop.setLetMethod(method);
+        currentClass.addMember(prop);
+    } else {
+        LOG.error("member with name:" + #IDENTIFIER.getText() + " exists and is"
+        + " instance of:" + mem.getClass().getName());
+    }
+}
+@prop_set : {
+    #IDENTIFIER.setType(PROPERTY_SET);
+    List arguments = args == null ? Collections.EMPTY_LIST : args;
+    args = null;
+	VbUserDefinedMethod method = new VbUserDefinedMethod(#IDENTIFIER.getText(),
+    arguments, false, false);
+	Member mem = currentClass.getMemberObject(#IDENTIFIER.getText());
+    if (mem instanceof VbUserDefinedProperty) {
+        ((VbUserDefinedProperty) mem).setSetMethod(method);
+    } else if (mem == null) {
+        VbUserDefinedProperty prop = new VbUserDefinedProperty();
+        prop.setName(#IDENTIFIER.getText());
+        prop.setSetMethod(method);
+        currentClass.addMember(prop);
+    } else {
+        LOG.error("member with name:" + #IDENTIFIER.getText() + " exists and is"
+        + " instance of:" + mem.getClass().getName());
+    }
+}
+@property : {
+    if (#pdecl.getNextSibling() != null) {
+        AST next = #pdecl.getNextSibling();
+        #pdecl.addChild(next);
+        #pdecl.setNextSibling(null);
+    }
+}
+@exit_prop : { #ex.setType(EXIT_PROPERTY); }
+
+@add_dim : {
+    addDim(#sd);
+}
+@add_dim2 : {
+    addDim(#sd2);
+}
+@add_id : {
+    currentClass.addMember(createIdProperty(#cid.getText()));
+}
+@do_init : { boolean whileFound = false;}
+@while_found : { #d.setType(DO_WHILE); #d.setText("do_while");}
+@until_found : { #d.setType(DO_UNTIL); #d.setText("do_until");}
+@found_while : {whileFound = true;}
+
+@for_identifier : {
+    #for_identifier = #(#[FOR_INIT, "for_init"], #for_identifier);
+}
+
+@if_then_else_statement : {
+    AST node =  #kif.getFirstChild();
+    if (node.getNextSibling() == null) { //is an empty if
+        #if_then_else_statement = #(#[IF_ELSE,"IfThenElse"], #kif);
+    } else {
+        //loop until we find an else or elseif node
+        while (node.getNextSibling() != null
+        && !(node.getNextSibling().getType() == ELSE
+        || node.getNextSibling().getType() == ELSEIF)) {
+            node = node.getNextSibling();
+        }
+        //if no else or elseif exits node should be null
+        if (node == null) {
+            #if_then_else_statement = #(#[IF_ELSE,"IfThenElse"], #kif);
+        } else {
+            //we found the first ELSE or ELSEIF.
+            //The rest of the nodes are either ELSEIF or ELSE
+            #if_then_else_statement = #[IF_ELSE,"IfThenElse"];
+            #if_then_else_statement.setFirstChild(#kif);
+            #kif.setNextSibling(node.getNextSibling());
+            node.setNextSibling(null);
+        }
+    }
+}
+
+@case_list : { #case_list = #(#[CASE_LIST,"CASE_LIST"], case_list); }
+@case_else : {#CASE.setType(CASE_ELSE);}
+
+@sub : {
+    #IDENTIFIER.setType(SUB);
+    addMethod(#IDENTIFIER.getText());
+    arrays = new TreeSet();
+}
+
+@function : {
+    #IDENTIFIER.setType(FUNCTION);
+    addMethod(#IDENTIFIER.getText());
+    arrays = new TreeSet();
+}
+
+@erase_func : {
+    arrays = globalArrays;
+    currentFunction = null;
+}
+@tset : !
+@set : {
+    AST ex = #expr;
+    ## = #([EXPR, "EXPR"],
+    #(#ASSIGN, #lset, ex.getFirstChild()));
+}
+
+@html : {
+    String text = #h.getText();
+    if (text != null && text.length() > 0) {
+        int i = 0;
+        while (i < text.length() &&
+        !(text.charAt(i) == 10 || text.charAt(i) == 13 || text.charAt(i) == 32)
+        ) {
+            i++;
+        }
+        if (i != text.length()) {
+            ## = #h;
+        }
+    }
+}
+
+
+@while_wend : { #WHILE.setType(WHILE_WEND); }
+
+@with_expr : { withCount++; inWith = true; }
+@with_count : {withCount--; inWith = withCount > 0;}
+
+@arg_init : { args = new ArrayList(); }
+
+@expression_list : {
+    #expressionList = #(#[ARGLIST_VALUES,"ARGLIST_VALUES"], #expressionList);
+}
+
+@expression : {#expression = #(#[EXPR,"EXPR"], #expression);}
+
+@logical_expression : {
+    #logicalExpression = #(#[EXPR,"EXPR"], #logicalExpression);
+}
+
+@unary_minus : {#MINUS.setType(UNARY_MINUS);}
+@unary_plus : {#PLUS.setType(UNARY_PLUS);}
+
+@with_dot : {#DOT.setType(WITH_DOT);}
+
+@array_init : { boolean isArray = false;}
+@array_lastid : { lastId = null; }
+@array_lparen : {
+    isArray = lastId != null
+    && ((currentFunction == null && arrays.contains(lastId))
+    || currentFunction != null
+    && (arrays.contains(lastId) || globalArrays.contains(lastId)));
+    #LPAREN.setType(isArray ? INDEX_OP : METHOD_CALL);
+}
+
+
+@index_list : {#indexList = #(#[INDEX_LIST,"INDEXES"], indexList);}
+
+@set_lastid : { lastId = #id.getText(); }
+
+@default_matched : {
+    if (currentClass == null) {
+        throw new RecognitionException(
+        "default keyword can be used only inside classes");
+    }
+}
+
+@sub_def : {
+    VbUserDefinedMethod method = getFunction(#dsub.getText());
+    method.setDefault(true);
+}
+
+@func_def : {
+    VbUserDefinedMethod method = getFunction(#dfunc.getText());
+    method.setDefault(true);
+}
+
+
+
+@method_arg_init : { boolean byRef = false; }
+@byref : { byRef = true; }
+@method_arg : {
+    if (byRef) {
+        #id.setType(BYREF);
+    }
+    args.add(#id);
+}
+
+@preserve : { #r.setType(REDIM_PRESERVE); }
+@end : {}
+
+
+
+
+@lexer_init : {
+    private int lastToken;
+    /*
+    Keeps all IDENTIFIER found during lexing fase
+    After the firts occurance of an IDENTIFIER all other occurances
+    will have the same text as the first one
+    In this whay, the identifiers will be case sensitive.
+    */
+    private Map identifiers = new TreeMap();
+
+    private int getProperType() {
+        int result;
+        if (lastToken == CONTINUE_STAT || lastToken == STATEMENT_END) {
+            result = Token.SKIP;
+        } else {
+            result = STATEMENT_END;
+        }
+        return result;
+    }
+
+
+	protected Token makeToken(int type) {
+		lastToken = type;
+		return super.makeToken(type);
+	}
+}
+
+
+@lexer_typedot : {_ttype = DOT;}
+@lexer_typefloat : { _ttype = DFLOAT; }
+@lexer_typeint : {_ttype = DINT;}
+@lexer_typeconcat : { _ttype = CONCAT; }
+@lexer_lasttoken_stat : {lastToken = CONTINUE_STAT; $setType(Token.SKIP);}
+
+@lexer_store_last : { int prev = lastToken; }
+@lexer_identifier : {
+    /*
+      Since ASP uses ActiveX components
+      and an ActiveX can have a method or attribute with
+      name equal to some keyword, be sure that the last token
+      wasn't DOT
+    */
+	lastToken = prev;
+    if (lastToken != DOT) {
+        String idText = id.getText().toUpperCase();
+        Object intVal = VbsConstants.KEYWORDS.get(idText);
+        if (intVal != null) {
+            _ttype = ((Integer) intVal).intValue();
+        } else {
+            _ttype = IDENTIFIER;
+        }
+    } else {
+        _ttype = IDENTIFIER;
+    }
+    if (_ttype == IDENTIFIER) {
+        String idText = $getText;
+        String key = idText.toUpperCase();
+        if (identifiers.containsKey(key)) {
+            String prevText = (String) identifiers.get(key);
+            $setText(prevText);
+        } else {
+            identifiers.put(key, idText);
+        }
+    }
+    if (_ttype == REM) {
+        mLINE(false);
+        _ttype = STATEMENT_END;
+    }
+}
+
+@lexer_aspend : { _ttype = HtmlLexerUtil.ASP_END;}
+@lexer_vbsend : { _ttype = HtmlLexerUtil.VBS_END;}
+
+
+@lexer_langinit : {String lang = null;}
+@lexer_langi : {lang = i.getText();}
+@lexer_langj : {lang = j.getText();}
+@lexer_langend : {
+    $setType(HtmlLexerUtil.LANGUAGE);
+    $setText(lang);
+}
+
+
+@lexer_ws : {
+    newline();
+    $setType(getProperType());
+}
+
+
+@lexer_line : { newline();}
+
+@lexer_comment : {
+	if (LA(1) == '\n') {
+		match('\n');
+		newline();
+	}
+    $setType(getProperType());
+    $setText("");
+}
+
+@lexer_ge : { $setType(GE); }
+@lexer_ignored :   {_ttype = Token.SKIP;}

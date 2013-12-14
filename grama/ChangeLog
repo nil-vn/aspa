@@ -1,0 +1,63 @@
+2005-02-01  anakreon  <e@localhost.localdomain>
+
+	* tree_vbs_php.act: Translate declaration of multidimension
+	array using array_fill.
+	For example dim a(12, 3) will be $a = array_fill(0, 13, array())
+
+	* vbs.g: Modified rule dimension_length to allways produce a tree
+	like (EXPR ..). 
+
+	* tree_vbs.g: Removed obsolote rule case_cond
+
+2005-01-31  anakreon  <e@localhost.localdomain>
+
+	* tree_vbs.g: changed rule s_decl to accept an expression
+	instead of an int as dimension size
+	Added rule redim_decl which is similar to s_decl and is used
+	for the REDIM statement
+
+2005-01-21  anakreon  <e@localhost.localdomain>
+
+	* vbs.act: Changed the tree produced from SUB_CALL
+	into (SUB_CALL expression)
+	Replaced rules call_sub and call_obj with rule call_end
+	* vbs.act: Changed the tree produced from rule expr_statement_list
+	into (EXPR (ASSIGN expression (METHOD_CALL..)))
+	or (SUB_CALL ..)
+
+2004-11-01  anakreon  <e@localhost.localdomain>
+
+	* tree_vbs_php.act: handleIdObject would create an instance with wrong ASPClass
+
+2004-10-30  anakreon  <e@localhost.localdomain>
+
+	* vbs.g (GE): Added alias for GE (=>)
+	(LE): Added alias for LE (=<)
+
+2004-10-29  anakreon  <e@localhost.localdomain>
+
+	* vbs.g (CALL): store the last token so it is not overwritten by the IDENTIFIER 
+	If a Call statement was inside a with statement, the expression "call .someMethod" would fail
+	to parse.
+	(COMMENT): Comments can end with the token %> 
+
+	* vbs.act: lastType is now set by the overriden method makeToken of CharScaner.
+
+	* vbs.g: Added support for the preserve keyword in the redim statement
+	Changed the rule s_decl so it can accept any arithmetic expression as a subscript.
+	Before: a(12, 13)
+	Now: a(12, 39 + 1)
+	(COMMENT): The token type of the comment depends on the last token's type.
+	If the last token type is STATEMENT_END then it will be SKIP.
+	This will eliminate to Tokens of type STATEMENT_END in a row.
+
+2004-10-20  anakreon  <e@localhost.localdomain>
+
+	* tree_vbs_php.act: Added variable lastType which stores the last type
+	evalueated.
+	(DOT expr expr) will set type INVALID_OBJECT if it failed to resolve the
+	class from the first expr.
+	Added token types BXOR, BAND, BOR, BNOT
+	variables changed from HashMap to TreeMap for speed
+	Renamed method translateObjects(int, AST, AST) to createNode
+

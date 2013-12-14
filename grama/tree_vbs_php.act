@@ -1,0 +1,2166 @@
+@import :
+/*
+    This file is part of Aspa.
+
+    Aspa is free software; you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation; either version 2 of the License, or
+    (at your option) any later version.
+
+    Aspa is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with Aspa; if not, write to the Free Software
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+*/
+import java.util.HashSet;
+import java.util.Set;
+import java.util.Map;
+import java.util.HashMap;
+import java.util.List;
+import java.util.ArrayList;
+import java.util.Stack;
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.TreeMap;
+import antlr.CommonToken;
+import gr.omadak.leviathan.asp.objects.ObjectAST;
+import gr.omadak.leviathan.asp.objects.ASPObject;
+import gr.omadak.leviathan.asp.objects.ASPClass;
+import gr.omadak.leviathan.asp.objects.ASPObjectInstance;
+import gr.omadak.leviathan.asp.objects.Property;
+import gr.omadak.leviathan.asp.objects.Member;
+import gr.omadak.leviathan.asp.objects.Method;
+import gr.omadak.leviathan.asp.objects.VbUserDefinedMethod;
+import gr.omadak.leviathan.asp.objects.VbUserDefinedProperty;
+import org.apache.log4j.Logger;
+import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.collections.Transformer;
+
+@tokens :
+    STAR_ASSIGN; CONCAT_ASSIGN; DIV_ASSIGN; MINUS_ASSIGN; MOD_ASSIGN;
+    PLUS_ASSIGN; OBJECT_MEMBER; OBJECT_METHOD; VOID; CAST; DBOOL; CONDITIONAL;
+    CONSTANT; BREAK; CASE_ROOT; FOR_EACH; LCURLY;
+    LBRACK; ANY; GLOBALS; UKNOWN_METHOD;
+    DO_END; POST_PLUS; POST_MINUS; RETURN;
+    NON_APPLICABLE_HEADER; UNSUPORTED; INVALID_OBJECT;
+    OBJECT_ATTRIBUTE; BXOR; BOR; BAND; BNOT; CONSTRUCTOR;
+@init :
+{
+    private int lastForWhile = 1;
+    private Stack argStack = new Stack();
+    private Stack withObjects = new Stack();
+    private Map variables = new TreeMap();
+    private Map levelList = new HashMap();
+    private int cLevel = 0;
+    private AspParser parser;
+    private int lastWithVar = 1;
+    private Map localFunctions = new HashMap();
+	private Map localClasses = new HashMap();
+    private VbUserDefinedMethod currentFunction;
+    private ASPClass currentClass;
+    private Property currentProperty;
+    private Set identifiers;
+    private Set dependencies;
+	private Stack typeStack = new Stack();
+	private int lastType;
+    private Logger log = Logger.getLogger(VbsTree.class);
+	//indicates if inside a redim preserve rule
+	private boolean redimp;
+
+
+    private static Map OBJECT_CLASSES;
+    private static Map FUNCTIONS;
+    private static String WITH_VAR = "WITH_VAR";
+    private static String FUNCTION_RESULT = "function_result";
+    private static Integer ALLARGS = new Integer(CommonConstants.ALL_ARGS);
+
+    public static void setClassesAndFunctions(Map classes, Map functions) {
+        OBJECT_CLASSES = classes;
+        FUNCTIONS = functions;
+    }
+
+    /* Implementation of SymbolTableExposer */
+    public Map getVariables() {
+		/*
+        HashMap variables = new HashMap(objects);
+        if (identifiers != null) {
+            for (Iterator it = identifiers.iterator(); it.hasNext();) {
+                String id = (String) it.next();
+                if (!variables.containsKey(id)) {
+                    variables.put(id, null);
+                }
+            }
+        }
+        return new HashMap(objects);
+		*/
+		return new HashMap(variables);
+    }
+
+
+    public List getFunctions() {
+        return new ArrayList(localFunctions.values());
+    }
+
+
+    public List getClasses() {
+        return new ArrayList(localClasses.values());
+    }
+
+
+    public List getDependencies() {
+        return dependencies == null ? Collections.EMPTY_LIST
+        : new ArrayList(dependencies);
+    }
+
+
+    public void setAspParser(AspParser parser) {
+        this.parser = parser;
+		log = Logger.getLogger("gr.omadak.leviathan.asp.VbsTree."
+							   + parser.getCurrentFileName().replace('.', '_'));
+    }
+
+
+    public void appendVariables(Map vars) {
+        variables.putAll(vars);
+    }
+
+
+    public void appendFunctions(List funcs) {
+        for (Iterator it = funcs.iterator(); it.hasNext();) {
+            Method method = (Method) it.next();
+            if (!localFunctions.containsKey(method.getName())) {
+                localFunctions.put(method.getName(), method);
+            }
+        }
+    }
+
+
+    public void appendClasses(List classes) {
+        for (Iterator it = classes.iterator(); it.hasNext();) {
+            ASPClass clazz = (ASPClass) it.next();
+            if (!localClasses.containsKey(clazz.getName())) {
+                localClasses.put(clazz.getName(), clazz);
+            }
+        }
+    }
+
+
+    public void setFunctions(List functions) {
+		if (functions != null) {
+			for (Iterator it = functions.iterator(); it.hasNext();) {
+				VbUserDefinedMethod method = (VbUserDefinedMethod) it.next();
+				if (!localFunctions.containsKey(method.getName())) {
+					localFunctions.put(method.getName(), method);
+				}
+			}
+		}
+	}
+
+
+	public void setClasses(List classes) {
+		if (classes != null) {
+			for (Iterator it = classes.iterator(); it.hasNext();) {
+				ASPClass clazz = (ASPClass) it.next();
+				localClasses.put(clazz.getName(), clazz);
+			}
+		}
+	}
+
+
+	public void setGlobalIds(Set globals) {
+        identifiers = globals;
+    }
+
+
+    private ASPObjectInstance getObjectInstance(AST ast) {
+        ASPObjectInstance result = null;
+        if (ast instanceof ObjectAST) {
+            ObjectAST oAST = (ObjectAST) ast;
+            ASPObjectInstance inst = oAST.getInstance();
+			ASPClass clazz = inst.getASPClass();
+			if (inst.getMember() != null) {
+				Member mem = inst.getMember();
+				if (mem.getEvaluatedClass() != null) {
+					clazz = mem.getEvaluatedClass();
+				} else {
+					log.error("BUG:I expected the member to be null:" + inst);
+				}
+			}
+			result = new ASPObjectInstance(inst.getInstance(), clazz);
+        } else if (ast.getType() == IDENTIFIER) {
+            String className = ast.getText();
+            if (OBJECT_CLASSES.containsKey(className.toUpperCase())) {
+                result = new ASPObjectInstance((ASPClass) OBJECT_CLASSES.get(
+                className.toUpperCase()));
+            } else {
+                result = getObject(className);
+            }
+        }
+        return result;
+    }
+
+
+	private void collectDependencies(Member mem) {
+        List incs = mem.getDependencies();
+        if (!incs.isEmpty()) {
+            if (dependencies == null) {
+                dependencies = new HashSet();
+            }
+            dependencies.addAll(incs);
+        }
+    }
+
+
+    private AST getObject(AST objAST, AST member) {
+        ASPObjectInstance instance = getObjectInstance(objAST);
+        AST result;
+        if (instance != null) {
+            result = getObject(instance, member);
+        } else {
+            log.warn("No instance found for:" + objAST.getText());
+            result = null;
+        }
+        return result;
+    }
+
+
+    private AST getObject(ASPObjectInstance instance, AST member) {
+        AST result = null;
+        ASPClass clazz = instance.getASPClass();
+        if (clazz == null) {
+            log.error("Unable to get class:" + instance.getInstance());
+        } else {
+            Member mem = clazz.getMemberObject(member.getText());
+            if (mem == null) {
+                log.error("Failed to get member:" + member.getText()
+                + " from class:" + clazz.getName());
+            } else {
+                instance.setMember(mem);
+                Token token = new CommonToken(mem.getReturnType(),
+                member.getText());
+                if (mem instanceof Method) {
+                    List alts = clazz.getMemberList(member.getText());
+                    if (alts.size() > 1) {
+                        instance.setMemberList(alts);
+                    }
+                }
+                result = new ObjectAST(token, instance);
+            }
+        }
+        if (result == null) {
+            int code = DOT;
+            log.error("Failed to resolve member:" + member.getText()
+            + " from class:"
+            + (clazz != null ? clazz.getName() : "null"));
+        }
+        return result;
+    }
+
+
+    private AST translateMember(Member mem, ASPObjectInstance instance) {
+        AST result;
+        if (mem instanceof Property) {
+            Property prop  = (Property) mem;
+            result = prop.read(instance == null ? null : instance.getInstance());
+        } else if (mem instanceof Method) {
+            Method method  = (Method) mem;
+            result = method.translate(instance == null ? null : instance.getInstance());
+        } else {
+            result = null;
+            log.error("Passed null for translateMember");
+        }
+        if (result != null) {
+            collectDependencies(mem);
+			lastType = mem.getReturnType();
+        }
+        return result;
+    }
+
+
+    private AST translateMember(Member mem, ASPObjectInstance instance, AST value) {
+        AST result;
+        if (mem instanceof Property) {
+            Property prop = (Property) mem;
+            prop.setArgs(Collections.singletonList(value));
+            result = prop.write(instance == null ? null : instance.getInstance());
+            if (result != null) {
+                collectDependencies(prop);
+            }
+			lastType = prop.getReturnType();
+        } else {
+            Property property;
+            if (mem.getEvaluatedClass() != null) {
+                property = mem.getEvaluatedClass().getDefaultProperty();
+            } else {
+                property = null;
+            }
+            if (property != null) {
+                result = translateMember(property, instance, value);
+            } else {
+                log.error(
+                "Can not assign to a method who does not have"
+                + " an associated class or has a class with no "
+                + " default property");
+                result = null;
+            }
+        }
+        return result;
+    }
+
+
+	private int getType(AST ast) {
+		int result;
+		switch (ast.getType()) {
+		case DINT:
+		case DFLOAT:
+		case DSTRING:
+		case DDATE:
+		case TRUE:
+		case FALSE:
+		case NULL:
+		case NOTHING:
+		case EMPTY:
+			result = ast.getType();
+			break;
+		case IDENTIFIER:
+			result = getIdentifierType(#ast.getText());
+			break;
+		case UKNOWN_METHOD:
+		case INVALID_OBJECT:
+			result = CommonConstants.UKNOWN_TYPE;
+			break;
+		default:
+			if (!typeStack.isEmpty()) {
+				result = ((Integer) typeStack.pop()).intValue();
+			} else {
+				result = CommonConstants.UKNOWN_TYPE;
+			}
+			break;
+		}
+		return result;
+	}
+
+
+	private AST getDefault(AST ast) {
+        AST result = null;
+        if (ast != null) {
+            if (ast.getType() == IDENTIFIER && currentFunction != null
+            && !FUNCTION_RESULT.equals(ast.getText())) {
+                String name = ast.getText();
+                boolean isGlob = identifiers.contains(name);
+				currentFunction.placeVar(name, getIdentifierType(name), !isGlob);
+            }
+			if (ast instanceof ObjectAST || ast.getType() == IDENTIFIER) {
+				result = translateObject(ast);
+				//the type will be handled by translateObject(ObjectAST)
+			} else {
+				lastType = getType(ast);
+			}
+        }
+		return result == null ? ast : result;
+	}
+
+
+    private AST createNode(int type, AST left, AST right) {
+        try {
+			String label = _tokenNames[type];
+            return #([type, label], left, right);
+		} catch (Exception ex) {
+			return #([type], left, right);
+		}
+	}
+
+
+    private ASPObjectInstance setMember(Map map, String name) {
+        Object obj = map.get(name);
+        ASPObjectInstance result = new ASPObjectInstance();
+        if (obj instanceof Method) {
+            result.setMember((Method) obj);
+        } else {
+            result.setMemberList((List) obj);
+        }
+        return result;
+    }
+
+
+    private ASPObjectInstance getMethod(AST ast, List args) {
+        ASPObjectInstance result = null;
+        if (ast instanceof ObjectAST) {
+            ObjectAST oAST = (ObjectAST) ast;
+            ASPObjectInstance inst = oAST.getInstance();
+            AST instance = inst.getInstance();
+            ASPObject obj;
+             Member mem = inst.getMember();
+             if (mem == null) {
+                 List methods = inst.getMemberList();
+                 if (methods != null) {
+                     obj = getSuitableMethod(methods, args);
+                 } else {
+                     obj = inst.getASPClass();
+                 }
+            } else {
+                obj = mem;
+            }
+            if (obj instanceof Method) {
+                result = new ASPObjectInstance(instance);
+                result.setMember((Method) obj);
+            } else if (obj instanceof ASPClass) {
+                ASPClass clazz = (ASPClass) obj;
+                result = new ASPObjectInstance(instance, clazz);
+                Member member = clazz.getDefaultMethod();
+                if (member == null) {
+                    log.error("Class:" + obj.getName()
+                    + " returned [null] default method");
+                } else {
+                    result.setMember(member);
+                }
+            } else if (obj instanceof Property) {
+                ASPClass clazz = ((Property) obj).getEvaluatedClass();
+                if (clazz == null) {
+                    log.error("Expected method but found property:"
+                    + obj.getName() + " wich does not evaluate to class" );
+                } else {
+                    result = new ASPObjectInstance(instance, clazz);
+                    Method method = clazz.getDefaultMethod();
+                    if (method == null) {
+                        log.warn("Class:" + clazz.getName()
+                        + " evaluated from property:" + obj.getName()
+                        + " has no default method");
+                    } else {
+                        result.setMember(method);
+                    }
+                }
+            } else { //should be null so look for an ASPObjectInstance
+                result = oAST.getInstance();
+                if (result != null) {
+                    if (result.getMemberList() != null) {
+                        result.setMember(
+                        getSuitableMethod(result.getMemberList(), args));
+                    }
+                }
+            }
+        } else if (ast.getType() == IDENTIFIER
+        || ast.getType() == METHOD_CALL) {
+            String fName = ast.getText();
+            String uName = fName.toUpperCase();
+            boolean inGlobFunctions = FUNCTIONS.containsKey(uName);
+            boolean inLocalFunctions = localFunctions.containsKey(fName);
+            if (inGlobFunctions || inLocalFunctions) {
+                result =
+                setMember(inGlobFunctions ? FUNCTIONS : localFunctions,
+                inGlobFunctions ? uName : fName);
+            } else if (OBJECT_CLASSES.containsKey(uName)
+            || getObject(fName) != null) {
+                ASPClass clazz;
+                AST inst = null;
+                if (OBJECT_CLASSES.containsKey(uName)) {
+                    clazz = (ASPClass) OBJECT_CLASSES.get(uName);
+                } else {
+                    ASPObjectInstance instance = getObject(fName);
+                    clazz = instance.getASPClass();
+                    inst = instance.getInstance();
+                }
+                Method method = clazz.getDefaultMethod();
+                if (method == null) {
+                    log.warn("Class:" + ast.getText()
+                    + " has no default method");
+                } else {
+                    result = new ASPObjectInstance(inst, clazz);
+                    result.setMember(method);
+                }
+            } else {
+                log.warn("Unable to locate method:" + ast.getText());
+            }
+        } else {
+            log.error("Expected an IDENTIFIER or an ObjectAST but is:["
+            + ast.getType() + ", " + ast.getText() + "]");
+        }
+        if (result != null && result.getMember() != null) {
+            result.getMember().setArgs(args);
+        }
+        return result;
+    }
+
+
+    private Method getSuitableMethod(List methods, List args) {
+        List comply = new ArrayList();
+        Method result = null;
+        for (Iterator it = methods.iterator(); it.hasNext();) {
+            Member mem = (Member) it.next();
+            if (mem instanceof Method) {
+                Method method = (Method) mem;
+                List methArgs = method.getArgTypes();
+                if (methArgs.size() == args.size()
+                || (methArgs.size() - 1 < args.size()
+                && methArgs.contains(ALLARGS))) {
+                    comply.add(method);
+                }
+            }
+        }
+        switch (comply.size()) {
+        case 0:
+            for (Iterator it = methods.iterator(); it.hasNext();) {
+                Member mem = (Member) it.next();
+                if (mem instanceof Method) {
+                    result = (Method) mem;
+                    break;
+                }
+            }
+            break;
+        case 1:
+            result = (Method) comply.get(0);
+            break;
+        case 2:
+            Method m1 = (Method) comply.get(0);
+            Method m2 = (Method) comply.get(1);
+            result = m1.getArgTypes().contains(ALLARGS) ? m2 : m1;
+            break;
+        default:
+            log.warn("More then 2 alternatives for method:"
+            + ((ASPObject) comply.get(0)).getName()
+            + " for args:" + args);
+            result = (Method) comply.get(0);
+            break;
+        }
+        return result;
+    }
+
+
+    private AST hardTranslate(AST ast) {
+        AST result = ast;
+        if (ast instanceof ObjectAST) {
+            ObjectAST oAST = (ObjectAST) ast;
+            ASPObjectInstance instance = oAST.getInstance();
+            if (instance != null) {
+                result = translateObject(instance, ast.getType());
+            } else {
+                log.error("ast:" + ast + " has no Class or Member");
+            }
+        }
+        return result;
+    }
+
+
+    private void changeType(AST ast, int type) {
+        ast.setType(type);
+        try {
+            ast.setText(_tokenNames[type]);
+        } catch (IndexOutOfBoundsException ex) {}
+    }
+
+
+    private void translateUntil(AST uExpr) {
+        AST dw = uExpr.getFirstChild();
+        switch (dw.getType()) {
+            case LT:  changeType(dw, GE); break;
+            case GT:  changeType(dw, LE); break;
+            case LE:  changeType(dw, GT); break;
+            case GE:  changeType(dw, LT); break;
+            case NEQ: changeType(dw, EQ); break;
+            case EQ: changeType(dw, NEQ); break;
+            case NOT: dw = dw.getFirstChild(); break;
+            default: dw = #([NOT, "not"], dw); break;
+        }
+        uExpr.setFirstChild(dw);
+    }
+
+
+    private void setAssignement() {
+        Integer key = new Integer(cLevel);
+        Integer val = (Integer) levelList.get(key);
+        if (val == null) {
+            levelList.put(key, new Integer(1));
+        } else {
+            int iVal = val.intValue();
+            iVal |= 1;
+            levelList.put(key, new Integer(iVal));
+        }
+    }
+
+
+    private void setExit() {
+        Integer key = new Integer(cLevel);
+        Integer val = (Integer) levelList.get(key);
+        if (val == null) {
+            levelList.put(key, new Integer(2));
+        } else {
+            int iVal = val.intValue();
+            iVal |= 2;
+            levelList.put(key, new Integer(iVal));
+        }
+    }
+
+
+    private boolean valueAsignedForLevel() {
+        Integer key = new Integer(cLevel);
+        Integer val = (Integer)  levelList.get(key);
+        return val != null && (val.intValue() & 1) == 1;
+    }
+
+
+    private boolean exitForLevel() {
+        Integer key = new Integer(cLevel);
+        Integer val = (Integer) levelList.get(key);
+        return val != null && (val.intValue() & 2) == 2;
+    }
+
+
+    private void placeObject(String name, ASPObjectInstance inst) {
+        if (currentFunction != null) {
+            currentFunction.placeObject(name, inst,
+            !identifiers.contains(name) || currentFunction.hasVar(name));
+        } else {
+            variables.put(name, inst);
+        }
+    }
+
+
+    private void removeObject(String name) {
+        if (currentFunction != null) {
+            currentFunction.removeObject(name);
+        } else {
+            variables.remove(name);
+        }
+    }
+
+
+    private ASPObjectInstance getObject(String name) {
+        ASPObjectInstance result = null;
+        if (currentFunction != null) {
+            result = currentFunction.getObject(name);
+        }
+        if (result == null) {
+			Object obj = variables.get(name);
+			if (obj instanceof ASPObjectInstance) {
+				result = (ASPObjectInstance) variables.get(name);
+			}
+        }
+        return result;
+    }
+
+
+	private void removeVariable(String name) {
+		variables.remove(name);
+	}
+
+
+	private void addVariable(String name, int type) {
+		if (currentFunction != null) {
+			boolean local = currentFunction.hasVar(name) || !variables.containsKey(name);
+			currentFunction.placeVar(name, type, local);
+		} else {
+			variables.put(name, new Integer(type));
+		}
+	}
+
+
+    private AST handleIdObject(AST id, ObjectAST obj) {
+        AST result;
+        ASPObjectInstance aInst = obj.getInstance();
+        int retType = -1;
+        if (obj.getType() == CommonConstants.OBJECT_RET && aInst.getMember() == null) {
+			ASPClass clazz = aInst.getASPClass();
+            result = aInst.getInstance();
+			if (result == null && clazz != null && clazz.hasConstructor()) {
+				result = translateMember((Method) clazz.getConstructors().get(0),
+										 null);
+			}
+            placeObject(id.getText(), new ASPObjectInstance(
+            astFactory.dup(id), aInst.getASPClass()));
+            retType = 0;
+        } else {
+            Member member = aInst.getMember();
+            if (member != null) {
+                if (member.getRetObjectClass() != null) {
+                    placeObject(id.getText(), new ASPObjectInstance(
+                    astFactory.dup(id), member.getRetObjectClass()));
+                    retType = 0;
+                } else if (member instanceof Method) {
+                    Method method = (Method) member;
+                    if (method.isConstructor()) {
+                        placeObject(id.getText(), new ASPObjectInstance(
+                        astFactory.dup(id), method.getASPClass()));
+                        retType = 0;
+                    }
+                }
+                result = translateMember(member, aInst);
+                retType = retType == 0 ? 0 : member.getReturnType();
+            } else {
+                ASPClass clazz = aInst.getASPClass();
+                if (!clazz.hasConstructor()) {
+                    Property prop = clazz.getDefaultProperty();
+                    if (prop != null) {
+                        result = translateMember(prop, aInst);
+                        retType = prop.getReturnType();
+                    } else {
+                        log.error("handleIdObject found an ASPClass:"
+                        + clazz.getName() + " with no default property");
+                        result = null;
+                    }
+                } else {
+					ASPObjectInstance instance = new ASPObjectInstance(
+									astFactory.dup(id), clazz);
+                    placeObject(id.getText(), instance);
+                    retType = 0;
+                    result = translateMember(
+                    (Method) clazz.getConstructors().get(0), instance);
+                }
+            }
+        }
+		if (retType != 0) {
+			if (retType == -1) {
+				removeObject(id.getText());
+			} else {
+				addVariable(id.getText(), retType);
+			}
+        }
+        return result;
+    }
+
+
+    private AST handleWriteToObject(ObjectAST ast, AST value) {
+        if (value instanceof ObjectAST || value.getType() == IDENTIFIER) {
+            AST val = translateObject(value);
+			if (val != null) { // if the ObjectAST can not be translated
+				value = val; //keep the initial value
+			}
+        }
+        ASPObjectInstance instance = ast.getInstance();
+        AST result;
+        if (instance != null) {
+            if (instance.getMember() != null) {
+                result = translateMember(instance.getMember(),
+                instance, value);
+            } else {
+                ASPClass clazz = instance.getASPClass();
+                Member mem = clazz.getDefaultProperty() != null
+                ? (Member) clazz.getDefaultProperty()
+                : (Member) clazz.getDefaultMethod();
+                if (mem != null) {
+                    result = translateMember(mem,
+                    instance, value);
+                } else {
+                    log.error("class:" + clazz.getName() + " has no default"
+                    + " property or method");
+                    result = null;
+                }
+            }
+        } else {
+            log.error("instance was null!");
+            result = null;
+        }
+        return result;
+    }
+
+
+    private AST translateObject(ASPObjectInstance instance, int type) {
+        AST result = null;
+        Member mem = instance.getMember();
+        if (mem != null) {
+            result = translateMember(mem, instance);
+        } else {
+            ASPClass clazz = instance.getASPClass();
+            if (clazz != null) {
+                if (type == CommonConstants.OBJECT_RET) {
+                    result = instance.getInstance();
+                } else {
+                    Property prop = clazz.getDefaultProperty();
+                    if (prop != null) {
+						result = translateMember(prop, instance);
+                    } else {
+                        log.error("class:" + clazz.getName()
+                        + " has no default property");
+                    }
+                }
+            } else {
+                log.error("no member and no class set");
+            }
+        }
+        return result;
+    }
+
+
+    private AST translateObject(AST ast) {
+        ASPObjectInstance instance;
+        if (ast instanceof ObjectAST) {
+            ObjectAST oAst = (ObjectAST) ast;
+            if (oAst.getInstance() != null) {
+                instance = oAst.getInstance();
+            } else {
+                instance = getObjectInstance(ast);
+            }
+        } else if (ast.getType() == IDENTIFIER) {
+           instance = getObjectInstance(ast);
+		   if (instance == null) {
+			   lastType = getIdentifierType(ast.getText());
+		   }
+        } else {
+            instance = null;
+        }
+        return instance == null ? ast : translateObject(instance, ast.getType());
+    }
+
+
+    private boolean isBuiltIn(ASPClass clazz) {
+        return OBJECT_CLASSES.containsKey(clazz.getName().toUpperCase());
+    }
+
+
+    private AST makeFromList(List elems, AST root) {
+        AST result;
+        if (elems.isEmpty()) {
+            result = root;
+        } else {
+            for (Iterator it = elems.iterator(); it.hasNext();) {
+                AST element = (AST) it.next();
+                element.setNextSibling(null);
+            }
+            elems.add(0, root);
+            AST[] array = (AST[]) elems.toArray(new AST[0]);
+            result = astFactory.make(array);
+            elems.remove(0);
+        }
+        return result;
+    }
+
+
+    private AST handleFunctionSubEnd(AST methodAST, int lastStackSize) {
+		List[] args = argStack.size() != lastStackSize
+        ? (List[]) argStack.pop()
+        : null;
+        List arguments = args == null ? Collections.EMPTY_LIST : args[0];
+        AST result = null;
+        ASPObjectInstance methodInstance = getMethod(methodAST, arguments);
+        if (methodInstance != null) {
+            Method method = (Method) methodInstance.getMember();
+            if (method == null) {
+                List methods = methodInstance.getMemberList();
+                if (methods != null) {
+                    method = getSuitableMethod(methods, arguments);
+                    method.setArgs(arguments);
+                } else {
+                    log.warn("Instance:" + methodInstance + " has no method");
+				}
+            }
+            if (method != null) {
+                if (method.getReturnType() == CommonConstants.OBJECT) {
+                    if (method.getEvaluatedClass() != null) {
+                        ASPClass clazz = method.getEvaluatedClass();
+                        result = createObjectAST(CommonConstants.OBJECT,
+                        clazz.getName(), new ASPObjectInstance(
+                        methodInstance.getInstance(), clazz));
+					} else if (method.getRetObjectClass() != null) {
+                        ASPClass clazz = method.getRetObjectClass();
+                        AST trans = translateMember(method, methodInstance);
+                        result = createObjectAST(CommonConstants.OBJECT_RET,
+                        clazz.getName(), new ASPObjectInstance(trans, clazz));
+                    } else {
+                        result = createObjectAST(CommonConstants.OBJECT,
+                        method.getName(), methodInstance);
+                    }
+                } else {
+                    result = translateMember(method, methodInstance);
+					typeStack.push(new Integer(method.getReturnType()));
+                }
+            }
+        } else {
+            if (arguments.isEmpty()) {
+                result = #[UKNOWN_METHOD, methodAST.getText()];
+            } else {
+                result = makeFromList(arguments,
+                #[ARGLIST_VALUES, "ARGLIST_VALUES"]);
+                result = #([UKNOWN_METHOD, methodAST.getText()], result);
+            }
+        }
+        return result;
+    }
+
+
+	private AST translateArray(AST array, int lastStackSize) {
+		AST result;
+		List[] args = argStack.size() != lastStackSize
+        ? (List[]) argStack.pop()
+        : null;
+		if (args == null) {
+			log.warn("No indexe passed to array access:" + array);
+			//this case should not happen
+			result = null;
+		} else {
+			List indexes = args[0];
+			if (indexes.size() > 1) {
+				log.warn("For now it is not supported to access multydimension arrays");
+			}
+			AST index = (AST) indexes.get(0);
+			result = #([INDEX_OP, "INDEX_OP"], array , index);
+		}
+		return result;
+	}
+
+
+    private ObjectAST createObjectAST(int type, String label,
+    ASPObjectInstance instance) {
+        return new ObjectAST(new CommonToken(type, label), instance);
+    }
+
+
+    private List transform(List globals) {
+        List out = new ArrayList();
+        CollectionUtils.collect(globals, new Transformer() {
+            public Object transform(Object ob) {
+                String caption = (String) ob;
+                return #[IDENTIFIER, caption];
+            }
+        }, out);
+        return out;
+    }
+
+
+    //index is:0 for get, 1 for let, 2 for set
+    private void addProperty(Map props, AST root, int index) {
+        String name = root.getText();
+        Member mem = currentClass.getMemberObject(name);
+        if (mem instanceof VbUserDefinedProperty) {
+            VbUserDefinedProperty property = (VbUserDefinedProperty) mem;
+            String newName;
+            switch (index) {
+                case 0: newName = property.getGet().getName(); break;
+                case 1: newName = property.getLet().getName(); break;
+                default: newName = property.getSet().getName(); break;
+            }
+            root.setText(newName);
+            root.setType(FUNCTION);
+        }
+        AST[] items = (AST[]) props.get(name);
+        boolean isNew = items == null;
+        if (isNew) {
+            items = new AST[3];
+        }
+        items[index] = root;
+        if (isNew) {
+            props.put(name, items);
+        }
+        currentFunction = null;
+        currentProperty = null;
+    }
+
+
+    private void makeSub(AST subRoot) {
+        AST fList;
+        List args = currentFunction.getArgTypes();
+        if (args != null && !args.isEmpty()) {
+            fList = makeFromList(args, #[ARGLIST, "ARGLIST"]);
+        } else {
+            fList = null;
+        }
+        subRoot.setType(FUNCTION);
+        List globals = currentFunction.getUsedGlobals();
+        AST globalsAST = null;
+        if (!globals.isEmpty()) {
+            globalsAST = makeFromList(transform(globals), #[GLOBALS, "GLOBALS"]);
+        }
+        if (fList != null) {
+            AST fChild = subRoot.getFirstChild();
+            subRoot.setFirstChild(fList);
+            fList.setNextSibling(fChild);
+        }
+        if (fList != null && globalsAST != null) {
+            AST arguments = subRoot.getFirstChild();
+            AST next = arguments.getNextSibling();
+            arguments.setNextSibling(globalsAST);
+            globalsAST.setNextSibling(next);
+        } else if (globalsAST != null) {
+            AST fChild = subRoot.getFirstChild();
+            subRoot.setFirstChild(globalsAST);
+            globalsAST.setNextSibling(fChild);
+        }
+        currentFunction = null;
+    }
+
+
+    private AST makeFunction(AST funcRoot, AST statements) {
+        AST fList;
+        AST result;
+        List args = currentFunction.getArgTypes();
+        if (args != null && !args.isEmpty()) {
+            fList = makeFromList(args, #[ARGLIST, "ARGLIST"]);
+        } else {
+            fList = null;
+        }
+        if (statements == null) { //no statements, so no globals or anything else
+            AST nullRet =
+            #([RETURN, "return"],
+                ([EXPR, "EXPR"], [NULL, "null"])
+            );
+            if (fList != null) {
+                result = #(funcRoot, fList, nullRet);
+            } else {
+                result = #(funcRoot, nullRet);
+            }
+        } else {
+            List elements = new ArrayList();
+            if (fList != null) {
+                elements.add(fList);
+            }
+            List globals = currentFunction.getUsedGlobals();
+            if (!globals.isEmpty()) {
+                AST globalsAST = makeFromList(transform(globals),
+                #[GLOBALS, "GLOBALS"]);
+                elements.add(globalsAST);
+            }
+            if (!valueAsignedForLevel()) {
+                AST declExpr =
+                #([EXPR, "EXPR"],
+                    ([ASSIGN, "="],
+                        [IDENTIFIER, FUNCTION_RESULT],
+                        [NULL, "null"]
+                    )
+                );
+                elements.add(declExpr);
+            }
+            AST stm = statements;
+            elements.add(stm);
+            while ((stm = stm.getNextSibling()) != null) {
+                elements.add(stm);
+            }
+            if (!exitForLevel()) {
+                AST retExpr =
+                #([RETURN, "return"],
+                    ([EXPR, "EXPR"],
+                        [IDENTIFIER, FUNCTION_RESULT]
+                    )
+                );
+                elements.add(retExpr);
+            }
+            result = makeFromList(elements,
+            #[funcRoot.getType(), funcRoot.getText()]);
+        }
+        currentFunction = null;
+        return result;
+    }
+
+
+    private AST exitFunction() {
+        AST result = valueAsignedForLevel()
+        ? #([RETURN, "return"],
+                    #([EXPR, "EXPR"],
+                    [IDENTIFIER, FUNCTION_RESULT])
+            )
+        : #([RETURN, "return"]);
+        setExit();
+        return result;
+    }
+
+
+    private VbUserDefinedMethod getProperty(String name, int type) {
+        VbUserDefinedProperty prop =
+        (VbUserDefinedProperty) currentClass.getMemberObject(name);
+        currentProperty = prop;
+        Method result;
+        switch (type) {
+            case 0 : result = prop.getGet(); break;
+            case 1 : result = prop.getLet(); break;
+            default : result = prop.getSet(); break;
+        }
+        return (VbUserDefinedMethod) result;
+    }
+
+
+	private int getIdentifierType(String name) {
+		int result;
+		if (currentFunction != null && currentFunction.hasVar(name)) {
+			result = currentFunction.getVariableType(name);
+		} else {
+			Object obj = variables.get(name);
+			if (obj instanceof Integer) {
+				result = ((Integer) obj).intValue();
+			} else if (obj instanceof ASPObjectInstance) {
+				result = CommonConstants.OBJECT;
+			} else {
+				result = CommonConstants.UKNOWN_TYPE;
+			}
+		}
+		return result;
+	}
+}
+
+
+@tdim : !
+@tredim : ! { AST redimRes = null; AST current = null;}
+@re_decl : { 
+	if (redimRes == null) {
+		redimRes = #re_decl;
+	} else {
+		current.setNextSibling(#re_decl);
+	}
+	current = #re_decl;
+}
+@redim_end : { ## = redimRes; }
+
+@tredimp : ! {redimp = true; }
+@redim_decl : {
+	List dimensions = new ArrayList();
+}
+@redim_inc : { 	dimensions.add(#ex.getFirstChild()); }
+@redim : {
+	String arrayName = #ARRAY.getText();
+	if (dimensions.size() == 1) {
+		AST argIndex = ((AST) dimensions.get(0));
+		if (argIndex.getType() == DINT) {
+			argIndex.setText(Integer.toString(
+							 Integer.parseInt(argIndex.getText()) + 1));
+		} else {
+			argIndex = #([PLUS, "+"], argIndex, [DINT, "1"]);
+		}
+        ## = #([EXPR, "EXPR"],
+          #([ASSIGN, "="], [IDENTIFIER, arrayName],
+            #([METHOD_CALL, "array_slice"],
+			  #([ARGLIST_VALUES, "ARGLIST_VALUES"],
+				[IDENTIFIER, arrayName],
+				[DINT, "0"],
+				 argIndex
+				)
+			  )
+			)
+		 );
+	} else {
+		if (dependencies == null) {
+			dependencies = new HashSet();
+		}
+		dependencies.add("translator/runtime.php");
+        ## = #([EXPR, "EXPR"],
+           #([ASSIGN, "="], [IDENTIFIER, arrayName],
+            #([METHOD_CALL, "vb_redim"],
+			  #([ARGLIST_VALUES, "ARGLIST_VALUES"],
+				[IDENTIFIER, arrayName],
+				#([METHOD_CALL, "array"],
+				  #([ARGLIST_VALUES, "ARGLIST_VALUES"],
+					makeFromList(dimensions, null)
+					)
+				  ),
+				#[DBOOL, Boolean.toString(redimp)]
+				)
+			  )
+		    )
+		  );
+	}
+}
+@start : { TokenMap.IS_JS = false; }
+
+
+@teq : !
+@post_eq : {
+    if (#eq_ex1 == null || #eq_ex2 == null) {
+        break; //this is a switch
+    }
+    //check if can translate a = a operator expr into a operator= expr
+    int eq2Type = #eq_ex2.getType();
+    int this_type;
+    String operator;
+    switch (eq2Type) {
+	case CONCAT: this_type = CONCAT_ASSIGN; operator = "&"; break;
+	case PLUS: this_type = PLUS_ASSIGN; operator = "+"; break;
+	case MINUS: this_type = MINUS_ASSIGN; operator = "-"; break;
+	case MOD: this_type = MOD_ASSIGN; operator = "\\"; break;
+	case ASTERISK: this_type = STAR_ASSIGN; operator = "*"; break;
+	case DIVIDE: this_type = DIV_ASSIGN; operator = "/"; break;
+	default: this_type = -1; operator = "="; break;
+    }
+    if (this_type != -1 && #eq_ex1.equalsTree(#eq_ex2.getFirstChild())) {
+        //if a = a + ..
+        #eq_ex1 = #eq_ex2.getFirstChild();
+        #eq_ex2 = #eq_ex1.getNextSibling();
+        #eq_ex1.setNextSibling(null);
+    } else {
+        this_type = ASSIGN;
+    }
+    boolean functionAssign = currentFunction != null
+    && #eq_ex1.getType() == IDENTIFIER
+    && FUNCTION_RESULT.equals(#eq_ex1.getText());
+    if (functionAssign) {
+        setAssignement();
+    }
+    boolean isAssign = this_type == ASSIGN;
+    boolean areObjects = #eq_ex1 instanceof ObjectAST
+    || #eq_ex2 instanceof ObjectAST;
+    if (isAssign && areObjects) {
+        if (#eq_ex1.getType() == IDENTIFIER) {
+            AST ast = handleIdObject(#eq_ex1, (ObjectAST) #eq_ex2);
+            if (ast != null && ast.getType() != Token.SKIP) {
+                #expression = #([this_type, "="], #eq_ex1, ast);
+            }
+        } else if (#eq_ex1 instanceof ObjectAST) {
+            #expression = handleWriteToObject((ObjectAST) #eq_ex1,
+            #eq_ex2);
+        } else { //#eq_ex2 is an ObjectAST
+            AST translated = translateObject((ObjectAST) #eq_ex2);
+            #expression = #([this_type, "="], #eq_ex1, translated);
+        }
+    } else if (!areObjects) {
+        if (#eq_ex2.getType() != NOTHING) {
+            #expression = #([this_type, "="], #eq_ex1, #eq_ex2);
+			if (#eq_ex1.getType() == IDENTIFIER) {
+				int rightType = getType(#eq_ex2);
+				if (rightType == CommonConstants.UKNOWN_TYPE) {
+					removeVariable(#eq_ex1.getText());
+				} else {
+					addVariable(#eq_ex1.getText(), rightType);
+				}
+			}
+        }
+    } else {
+        if (!(#eq_ex1 instanceof ObjectAST)) {
+            ObjectAST expr2 = (ObjectAST) #eq_ex2;
+            #expression = #([this_type, "="], #eq_ex1,
+            translateObject(expr2));
+        } else {
+            AST trans1 = translateObject((ObjectAST) #eq_ex1);
+            AST trans2 = #eq_ex2 instanceof ObjectAST
+            ? translateObject((ObjectAST) #eq_ex2)
+            : #eq_ex2;
+            AST value = #([eq2Type, operator], trans1, trans2);
+            #expression = handleWriteToObject((ObjectAST) #eq_ex1,
+            value);
+        }
+    }
+	typeStack.clear();
+}
+
+@tconst : !
+
+
+@twith: !
+@with_expr_end : {
+    //#with_expr is AST "."
+    AST fChild = #with_expr.getFirstChild();
+    ASPObjectInstance instance = getObjectInstance(fChild);
+    if (instance == null || instance.getASPClass() == null) {
+        log.error("The with expression did not evaluate in Object");
+    } else {
+        /*
+        Here are 2 cases.
+        1) A built-in objects is used in with, such as Response, Request,
+        Request.Cookies, ...
+        In this case no AST is produced for with_epr
+        2) A method call or a property which returns an Object is used.
+          A variable should be introduced which keeps a reference to
+          the returned Object.
+        */
+        if (instance.getInstance() == null) {
+            if (isBuiltIn(instance.getASPClass())) {
+                withObjects.push(
+                new Object[] {
+                    null, new ASPObjectInstance(instance.getASPClass())
+                });
+            } else {
+                String name = WITH_VAR + (lastWithVar++);
+                AST ast =
+                #([EXPR, "EXPR"],
+                    #([ASSIGN, "="], [IDENTIFIER, name],
+                        translateMember(instance.getMember(), null)
+                    )
+                );
+                withObjects.push(
+                new Object[] {
+                    ast, new ASPObjectInstance(#[IDENTIFIER, name], instance)
+                });
+            }
+        } else {
+            withObjects.push(new Object[] {null, instance});
+        }
+    }
+}
+@with_end :     {
+    Object[] stored = (Object[]) withObjects.pop();
+    instance = (ASPObjectInstance) stored[1];
+    AST decl = (AST) stored[0];
+    if (decl != null) {
+        ## = decl;
+        ##.setNextSibling(#statements);
+    } else {
+        ## = #statements;
+    }
+}
+
+
+@with_dot_end : {
+    ASPObjectInstance instance =
+    (ASPObjectInstance) ((Object[]) withObjects.peek())[1];
+    AST result;
+    if (instance != null) {
+        result = getObject(instance, #with_dotexpr);
+    } else {
+        result = null;
+    }
+    if (result == null) {
+        result = #([DOT, "."], [INVALID_OBJECT, "Invalid"],
+        #with_dotexpr);
+    }
+    #expression = result;
+}
+
+
+@tdot : !
+@dot_id_end : {
+    AST res = getObject(#do1, #do2);
+    if (res != null) {
+        #expression = res;
+    } else {
+        log.warn("Unable to resolve Member:" + #do2.getText() + " from object:"
+        + #do1.getText());
+        #expression = #(DOT, #do1, #do2);
+    }
+}
+
+
+@tnew : !
+@new : {
+    String className = #IDENTIFIER.getText();
+    ASPClass clazz = (ASPClass) localClasses.get(className);
+    if (clazz != null) {
+        ASPObjectInstance instance = new ASPObjectInstance(clazz);
+        instance.setMember((Method) clazz.getConstructors().get(0));
+        ## = createObjectAST(CommonConstants.OBJECT, clazz.getName(), instance);
+    } else {
+        log.error("No class with name:" + className);
+    }
+}
+/* Operators */
+
+@timp : !
+@pre_imp : { #imp1 = getDefault(#imp1); }
+/* not (expr1 and not expr2) */
+@post_imp :          {
+    #expression =
+    #([NOT, "not"],
+        #([AND, "and"],
+            #imp1,
+            #([NOT, "not"], getDefault(#imp2))
+        )
+    );
+typeStack.push(new Integer(DBOOL));   
+}
+
+
+@teqv : !
+@pre_eqv : { #eqv1 = getDefault(#eqv1); }
+/* not (expr1 xor expr2) */
+@post_eqv :          {
+    #expression =
+    #([NOT, "not"],
+        #([XOR, "xor"], #eqv1, getDefault(#eqv2))
+    );
+typeStack.push(new Integer(DBOOL));
+}
+
+
+@tint_div : !
+@pre_idiv : { #int_div1 = getDefault(#int_div1); }
+@post_idiv :   {
+    #expression =
+    #([METHOD_CALL, "ceil"],
+        #([ARGLIST_VALUES,"ARGLIST_VALUES"],
+            #([DIVIDE, "/"], #int_div1, getDefault(#int_div2))
+        )
+    );
+typeStack.push(new Integer(DINT));
+}
+
+
+@tdiv : !
+@pre_div : { #div1 = getDefault(#div1); }
+@post_div: {
+    #expression = createNode(DIVIDE, #div1, getDefault(#div2));
+	typeStack.push(new Integer(DFLOAT));
+}
+
+
+@tmul : !
+@pre_mul : { #mul1 = getDefault(#mul1); boolean leftDint = lastType == DINT;}
+@post_mul: {
+    #mul2 = getDefault(#mul2);
+    #expression = createNode(ASTERISK, #mul1, #mul2);
+	lastType = !leftDint || lastType != DINT ? DFLOAT : DINT;
+	typeStack.push(new Integer(lastType));
+}
+
+
+@tpow : !
+@pre_exp : { #exp1 = getDefault(#exp1); boolean leftDint = lastType == DINT;}
+@post_exp :          {
+    #expression =
+    #([METHOD_CALL, "pow"],
+        #([ARGLIST_VALUES,"ARGLIST_VALUES"],
+            #exp1,  getDefault(#exp2)
+        )
+    );
+	lastType = !leftDint || lastType != DINT ? DFLOAT : DINT;
+	typeStack.push(new Integer(lastType));
+}
+
+
+@txor : !
+@pre_xor: { #xor1 = getDefault(#xor1); boolean leftDint = lastType == DINT;}
+@post_xor : {
+    #xor2 = getDefault(#xor2);
+	if (leftDint && lastType == DINT) { //binary
+		#expression = createNode(BXOR, #xor1, #xor2);
+		typeStack.push(new Integer(DINT));
+	} else {
+        #expression = createNode(XOR, #xor1, #xor2);
+		typeStack.push(new Integer(DBOOL));
+	}
+}
+
+
+@tor : !
+@pre_or: { #or1 = getDefault(#or1); boolean leftDint = lastType == DINT;}
+@post_or : {
+    #or2 = getDefault(#or2);
+	if (leftDint && lastType == DINT) {
+		#expression = createNode(BOR, #or1, #or2);
+		typeStack.push(new Integer(DINT));
+	} else {
+        #expression = createNode(OR, #or1, #or2);
+		typeStack.push(new Integer(DBOOL));
+	}
+}
+
+
+@tand : !
+@pre_and: { #and1 = getDefault(#and1); boolean leftDint = lastType == DINT;}
+@post_and : {
+    #and2 = getDefault(#and2);
+	if (leftDint && lastType == DINT) {
+		#expression = createNode(BAND, #and1, #and2);
+		typeStack.push(new Integer(DINT));
+	} else {
+        #expression = createNode(AND, #and1, #and2);
+		typeStack.push(new Integer(DBOOL));
+	}
+}
+
+
+@tlt : !
+@pre_lt: { #lt1 = getDefault(#lt1);}
+@post_lt : {
+    #lt2 = getDefault(#lt2);
+    #expression = createNode(LT, #lt1, #lt2);
+	typeStack.push(new Integer(DBOOL));
+}
+
+
+@tgt : !
+@pre_gt: { #gt1 = getDefault(#gt1);}
+@post_gt : {
+    #gt2 = getDefault(#gt2);
+    #expression = createNode(GT, #gt1, #gt2);
+	typeStack.push(new Integer(DBOOL));
+}
+
+
+@tle : !
+@pre_le: { #le1 = getDefault(#le1);}
+@post_le : {
+    #le2 = getDefault(#le2);
+    #expression = createNode(LE, #le1, #le2);
+	typeStack.push(new Integer(DBOOL));
+}
+
+
+@tge : !
+@pre_ge: { #ge1 = getDefault(#ge1);}
+@post_ge : {
+    #ge2 = getDefault(#ge2);
+    #expression = createNode(GE, #ge1, #ge2);
+	typeStack.push(new Integer(DBOOL));
+}
+
+
+@teq_comp : !
+@pre_eq_comp: { #eq_comp1 = getDefault(#eq_comp1);}
+@post_eq_comp : {
+    #eq_comp2 = getDefault(#eq_comp2);
+    int code = EQ;
+    #expression = #([code, "="], #eq_comp1, #eq_comp2);
+	typeStack.push(new Integer(DBOOL));
+}
+
+
+@tneq : !
+@pre_neq: { #neq1 = getDefault(#neq1);}
+@post_neq : {
+    #neq2 = getDefault(#neq2);
+    #expression = createNode(NEQ, #neq1, #neq2);
+	typeStack.push(new Integer(DBOOL));
+}
+
+
+@tconc : !
+@pre_concat: { #concat1 = getDefault(#concat1);}
+@post_concat : {
+    #concat2 = getDefault(#concat2);
+    #expression = createNode(CONCAT, #concat1, #concat2);
+	typeStack.push(new Integer(DSTRING));
+}
+
+
+@tplus : !
+@pre_plus: { #plus1 = getDefault(#plus1); boolean leftDint = lastType == DINT;}
+@post_plus : {
+    #plus2 = getDefault(#plus2);
+    #expression = createNode(PLUS, #plus1, #plus2);
+	lastType = !leftDint || lastType != DINT ? DFLOAT : DINT;
+	typeStack.push(new Integer(lastType));
+}
+
+
+@tminus : !
+@pre_minus: { #minus1 = getDefault(#minus1); boolean leftDint = lastType == DINT;}
+@post_minus : {
+    #minus2 = getDefault(#minus2);
+    #expression = createNode(MINUS, #minus1, #minus2);
+	lastType = !leftDint || lastType != DINT ? DFLOAT : DINT;
+	typeStack.push(new Integer(lastType));
+}
+
+
+@tmod : !
+@pre_mod: { #mod1 = getDefault(#mod1);}
+@post_mod : {
+    #mod2 = getDefault(#mod2);
+    #expression = createNode(MOD, #mod1, #mod2);
+	typeStack.push(new Integer(DINT));
+}
+
+
+@tnot : !
+@not : {
+    #not = getDefault(#not);
+    //not not expr = expr
+    if (#not.getType() == NOT) {
+        #expression = #not.getFirstChild();
+    } else {
+        int code = lastType == DINT ? BNOT : NOT;
+		typeStack.push(new Integer(lastType == DINT ? lastType : DBOOL));
+        #expression = #([code, "not"], #not);
+    }
+}
+
+
+@tuminus : !
+@unary_minus : {
+    #uminus = getDefault(#uminus);
+	if (lastType != DINT && lastType != DFLOAT) {
+		lastType = DINT;
+    }
+    typeStack.push(new Integer(lastType));
+    if (#uminus != null) {
+        AST child = #uminus.getFirstChild();
+        if (child != null && child.getType() == UNARY_MINUS) {
+            #expression = child;
+        } else {
+            int code = UNARY_MINUS;
+            #expression = #([code, "-"], #uminus);
+        }
+    }
+    //--2 = 2
+}
+
+
+@tuplas : !
+@unary_plus :   {
+    #uplus = getDefault(#uplus);
+	if (lastType != DINT && lastType != DFLOAT) {
+		lastType = DINT;
+    }
+    typeStack.push(new Integer(lastType));
+    if (#uplus != null) {
+        #expression = #uplus;
+    }
+}
+
+@id : {
+    if (localFunctions != null) {
+        if (localFunctions.containsKey(#IDENTIFIER.getText())
+        && (currentFunction == null
+        || !currentFunction.getName().equals(#IDENTIFIER.getText()))) {
+            #IDENTIFIER.setType(METHOD_CALL);
+        } else if (currentFunction != null) {
+            if (currentFunction.getName().equals(#IDENTIFIER.getText())
+            || (currentProperty != null && currentProperty.getName().equals(
+            #IDENTIFIER.getText()))) {
+                #IDENTIFIER.setText(FUNCTION_RESULT);
+            }
+        }
+    }
+}
+
+@texpr: !
+@expr : {
+	typeStack.clear();
+    #e = hardTranslate(#e);
+    if (#e != null && #e.getType() != Token.SKIP) {
+        int type = EXPR;
+        if (#e.getType() == CommonConstants.TRANSLATE_ROOT) {
+            AST fChild = #e.getFirstChild();
+            List expressions = new ArrayList();
+            while (fChild != null) {
+                AST node = fChild.getType() == EXPR ? fChild
+                : #([type, "EXPR"], fChild);
+                expressions.add(node);
+                AST old = fChild;
+                fChild = fChild.getNextSibling();
+                old.setNextSibling(null);
+            }
+            ## = makeFromList(expressions, null);
+        } else {
+            ## = #([type, "EXPR"], #e);
+        }
+    }
+}
+
+@arg_val : { argStack.push(new List[] {new ArrayList(), new ArrayList()}); }
+@arg_val_end : {
+    List[] arguments = (List[]) argStack.peek();
+    arguments[0].add(hardTranslate(#arg));
+	arguments[1].add(new Integer(lastType));
+	typeStack.clear();
+}
+
+@init_stat : { int lastStackSize = 0; redimp = false; }
+@init_expr : { int lastStackSize = 0;  }
+
+@tmethod : !
+@func_call : {
+	lastStackSize = argStack.size();
+	boolean isArray = #func != null && #func.getType() == IDENTIFIER
+		&& getIdentifierType(#func.getText()) == ARRAY;
+}
+@func_call_end : {
+	if (isArray) {
+		## = translateArray(#func, lastStackSize);
+	} else {
+        ## = handleFunctionSubEnd(#func, lastStackSize); 
+	}
+}
+
+
+@tsub : ! 
+@sub_call : {
+	lastStackSize = argStack.size();
+	boolean isArray = #sub_name != null
+		&& #sub_name.getType() == IDENTIFIER
+		&& getIdentifierType(#sub_name.getText()) == ARRAY;
+}
+@sub_call_end : {
+	if (isArray) {
+		## = translateArray(#sub_name, lastStackSize);
+	} else {
+		## = handleFunctionSubEnd(#sub_name, lastStackSize); 
+	}
+	if (## != null) {
+		## = #([EXPR, "EXPR"], hardTranslate(##));
+	}
+}
+
+@trand : !
+@randomize : {
+    if (#ex != null) {
+        AST fChild = #ex.getFirstChild();
+        ## =
+        #([EXPR, "EXPR"],
+            #([METHOD_CALL, "srand"],
+                #([ARGLIST_VALUES,"ARGLIST_VALUES"], fChild)
+            )
+        );
+    } else {
+        ## = #([EXPR, "EXPR"], [METHOD_CALL, "srand"]);
+    }
+}
+
+
+@const_end : {
+    ## =
+    #([EXPR, "EXPR"],
+        #([METHOD_CALL, "define"],
+            #([ARGLIST_VALUES, "ARGLIST_VALUES"],
+                [DSTRING, #ci.getText()],
+                hardTranslate(cex),
+                [TRUE, "true"]
+            )
+        )
+    );
+}
+
+
+@terase : !
+@erase : {
+    ## =
+    #([EXPR, "EXPR"],
+        #([METHOD_CALL, "unset"],
+            #([ARGLIST_VALUES, "ARGLIST_VALUES"], #ei)
+        )
+    );
+}
+
+
+@texit : !
+@exit_do : { ## = #[BREAK, "break"]; }
+@exit_for : { ## = #[BREAK, "break"]; }
+@exit_sub : {
+    ## = #([RETURN, "return"]);
+}
+
+
+@tml : !
+@eq_end : {
+    AST exprChild = #mlexpr.getFirstChild();
+    exprChild.setNextSibling(null);
+    ## =
+    #([EXPR, "EXPR"],
+        #([METHOD_CALL, "print"],
+            #([ARGLIST_VALUES, "ARGLIST_VALUES"],
+                exprChild
+            )
+        )
+    );
+}
+
+@tarray : ! { List dims = new ArrayList();}
+@inc_dim : { dims.add(#ex.getFirstChild()); }
+@array_decl : {
+	String varName = #ARRAY.getText();
+	AST result;
+	if (dims.size() < 2) {
+		result = #[METHOD_CALL, "array"];
+	} else {
+		result = #[METHOD_CALL, "array"];
+		for (int i = dims.size() - 2; i > -1; i--) {
+			AST size = (AST) dims.get(i);
+			if (size.getType() == DINT) {
+				int intSize = Integer.parseInt(size.getText());
+				size.setText(Integer.toString(intSize + 1));
+			} else {
+				size = #([PLUS, "+"], size, [DINT, "1"]);
+			}
+			result = #([METHOD_CALL, "array_fill"],
+                       #([ARGLIST_VALUES, "ARGLIST_VALUES"],
+					   [DINT, "0"], size, result)
+					 );
+		}
+	}
+    ## = #([ASSIGN, "="], [IDENTIFIER, varName], result);
+}
+@dim_init : { List dimArrays = null; }
+@dim_decl : {
+    if (#decl.getType() != IDENTIFIER) {
+        if (dimArrays == null) {
+            dimArrays = new ArrayList();
+        }
+        dimArrays.add(#([EXPR, "EXPR"], #decl));
+    }
+    if (currentFunction != null) {
+        currentFunction.placeVar(
+        #decl.getType() == IDENTIFIER ? #decl.getText()
+        : #decl.getFirstChild().getText(), CommonConstants.UKNOWN_TYPE, true);
+    }
+}
+@dim_end : {
+    if (dimArrays != null) {
+        ##  = makeFromList(dimArrays, #[CommonConstants.TRANSLATE_ROOT]);
+    }
+}
+
+
+@tdw : !
+@do_while : { ## = #([WHILE, "while"], #do_while_expr, #dws); }
+
+@tdu: !
+@du_expr : {
+    translateUntil(#do_until_expr);
+}
+@do_until : { ## = #([WHILE, "while"], #do_until_expr, #dus); }
+
+@tdo : !
+@wh_condition : {
+    ## = #([DO, "do"], #dost, #([DO_END, "while"], #wh));
+}
+@u_condition : {
+    translateUntil(#unt); ## = #([DO, "do"], #dost,
+    #([DO_END, "while"], #unt));
+}
+@do_plain : {
+    ## = #([DO, "do"], #dost, #([DO_END, "while"], #([EXPR, "EXPR"],
+    [TRUE, "true"])));
+}
+@while_wend_end : { #wend.setType(WHILE); }
+
+@tcsmt: !
+@case_list_init : { List conditions = new ArrayList(); }
+@case : { conditions.add(#ccase);}
+@case_end : {
+    int caseType = CASE;
+    if (conditions.size() == 1) {
+        AST cond = (AST) conditions.get(0);
+        #case_stm = #([caseType, "case"], cond, #st, [BREAK, "break"]);
+    } else {
+        AST root = #[CASE_ROOT];
+        AST lastCond = null;
+        for (Iterator it = conditions.iterator(); it.hasNext();) {
+            AST cond = (AST) it.next();
+            AST caseCond = #([caseType, "case"], cond);
+            if (root.getFirstChild() == null) {
+                root.setFirstChild(caseCond);
+            } else {
+                lastCond.setNextSibling(caseCond);
+            }
+            lastCond = caseCond;
+        }
+        lastCond.getFirstChild().setNextSibling(#st);
+        #st.setNextSibling(#[BREAK, "break"]);
+        #case_stm = root;
+    }
+}
+@select_end : {
+    AST sel = #select;
+    AST child = sel.getFirstChild();
+    AST lastExamned = null;
+    while (child != null) {
+        if (child.getType() == CASE_ROOT) {
+            AST next = child.getNextSibling();
+            AST caseNode = child.getFirstChild();
+            while (caseNode.getNextSibling() != null) {
+                caseNode = caseNode.getNextSibling();
+            }
+            caseNode.setNextSibling(next);
+            child = child.getFirstChild();
+            if (lastExamned == null) {
+                sel.setFirstChild(child);
+            } else {
+                lastExamned.setNextSibling(child);
+            }
+            lastExamned = child;
+            child = next;
+        } else {
+            lastExamned = child;
+            child = child.getNextSibling();
+        }
+    }
+}
+
+@tcel : !
+@case_else_end : {
+    #case_else = #([CASE_ELSE, "defaut"], #st, [BREAK, "break"]);
+}
+
+@tfor : !
+@for : { AST toStep = null; AST whileAST = null; AST fIn = null;}
+@step : { toStep = #stpexpr; }
+@for_init : {
+    AST checkNode = toStep == null ? null : toStep.getFirstChild();
+    AST counterName = astFactory.dupTree(
+    #fInit.getFirstChild().getFirstChild());
+    if (checkNode != null
+    && checkNode.getType() != DINT
+    && checkNode.getType() != UNARY_MINUS) {
+        whileAST =
+        #([DO_END, "while"],
+            #([NEQ, "<>"],
+                counterName,
+                astFactory.dupTree(#toexpr.getFirstChild())
+            )
+        );
+    } else {
+        int forInitCode = FOR_INIT;
+        int operator;
+        if (checkNode != null) {
+            operator = checkNode.getType() == UNARY_MINUS ? GE : LE;
+            boolean isPostMin = operator == GE
+            && checkNode.getFirstChild() != null
+            && checkNode.getFirstChild().getType() == DINT
+            && Integer.parseInt(checkNode.getFirstChild().getText()) == 1;
+            boolean isPostPlus = !isPostMin
+            && checkNode.getType() == DINT
+            && Integer.parseInt(checkNode.getText()) == 1;
+            if (isPostMin) {
+                toStep = #([EXPR, "EXPR"],
+                    #([POST_MINUS, "--"], astFactory.dupTree(counterName))
+                );
+            } else if (isPostPlus) {
+                toStep = #([EXPR, "EXPR"],
+                    #([POST_PLUS, "++"], astFactory.dupTree(counterName))
+                );
+            } else {
+                toStep = checkNode.getType() == UNARY_MINUS
+                ? #([EXPR, "EXPR"],
+                    #([MINUS_ASSIGN, "-="],
+                        astFactory.dupTree(counterName),
+                        astFactory.dupTree(checkNode.getFirstChild())
+                    )
+                )
+                : #([EXPR, "EXPR"],
+                    #([PLUS_ASSIGN, "+="],
+                        astFactory.dupTree(counterName),
+                        astFactory.dupTree(checkNode)
+                    )
+                );
+            }
+        } else {
+            operator = LE;
+            toStep = #([EXPR, "EXPR"],
+                #([POST_PLUS, "++"], astFactory.dupTree(counterName))
+            );
+        }
+        String operatorName = _tokenNames[operator];
+        AST toChild = astFactory.dupTree(#toexpr.getFirstChild());
+        fIn =
+        #([forInitCode, "for_init"],
+            #fInit,
+            #([EXPR, "EXPR"],
+                #([operator, operatorName],
+                    counterName,
+                    toChild
+                )
+            ),
+            toStep
+        );
+    }
+}
+@for_end : {
+    if (whileAST != null) {
+        AST counterName = astFactory.dupTree(
+        #fInit.getFirstChild().getFirstChild());
+        counterName.setNextSibling(null);
+        AST counterTwo = astFactory.dupTree(counterName);
+        String incName = "while_step" + lastForWhile;
+        String limName = "while_lim" + lastForWhile++;
+        AST incLim = #[IDENTIFIER, limName];
+        ## =
+        #([CommonConstants.TRANSLATE_ROOT, "fake"],
+            #([EXPR, "EXPR"], #([ASSIGN, "="], [IDENTIFIER, incName],
+            toStep.getFirstChild())), #([EXPR, "EXPR"], #([ASSIGN, "="],
+            astFactory.dupTree(incLim), #toexpr.getFirstChild())),
+            #([DO, "Do"],
+                #fstm,
+                #([EXPR, "EXPR"],
+                    #([PLUS_ASSIGN, "="], counterName, [IDENTIFIER, incName])
+                ),
+                #([DO_END, "while"],
+                    #([EXPR, "EXPR"],
+                        #([NEQ, "<>"], counterTwo, incLim)
+                    )
+                )
+            )
+        );
+    } else if (fInit != null) {
+        int forCode = FOR;
+        ## = #([forCode, "for"], fIn, fstm);
+    } else { //talking about foreach
+        //TODO: Try to determine if the iterated variable is an array
+        ## =
+        #([FOR_EACH, "forach"],
+            ([FOR_INIT, "for_init"],
+                inexpr,
+                ([EXPR, "EXPR"], inid)
+            ), fstm
+        );
+    }
+}
+
+
+@statements_init : { AST lastStatement = null; }
+@statement : {
+    if (#stm != null) {
+        if (#stm.getType() == CommonConstants.TRANSLATE_ROOT) {
+            #stm = #stm.getFirstChild();
+        }
+        if (#statements == null) {
+            ## = #stm;
+            lastStatement = #stm;
+        } else {
+            lastStatement.setNextSibling(#stm);
+        }
+        while (lastStatement.getNextSibling() != null) {
+            lastStatement = lastStatement.getNextSibling();
+        }
+    }
+}
+
+@sub_decl : {
+    String text = #s.getText();
+    if (currentClass != null) {
+        Member mem = currentClass.getMemberObject(text);
+        if (mem instanceof VbUserDefinedMethod) {
+            currentFunction = (VbUserDefinedMethod) mem;
+        } else {
+            log.error("Class:" + currentClass.getName() + " has no member:"
+            + text);
+        }
+    } else {
+        currentFunction = (VbUserDefinedMethod) localFunctions.get(text);
+    }
+}
+@sub_end : {
+    makeSub(#s);
+    currentFunction = null;
+}
+
+
+@tfunc : !
+@func_decl : {
+    String text = #f.getText();
+    if (currentClass != null) {
+        Member mem = currentClass.getMemberObject(text);
+        if (mem instanceof VbUserDefinedMethod) {
+            currentFunction = (VbUserDefinedMethod) mem;
+        } else {
+            log.error("Class:" + currentClass.getName() + " has no member:"
+            + text);
+        }
+    } else {
+        currentFunction = (VbUserDefinedMethod) localFunctions.get(text);
+    }
+    levelList.clear();
+}
+@func_end : {
+    ## = makeFunction(#f, #fst);
+    currentFunction = null;
+}
+@exit_func : {
+    ## = exitFunction();
+}
+
+@nested : { cLevel++; }
+@nested_end : { cLevel--; }
+
+@include : {
+    try {
+        String text = parser.parseInclude(#include.getText(), this, true);
+        #include.setText(text);
+    } catch (ANTLRException aex) {
+        log.error("Failed to parse included file:" + #include.getText(), aex);
+    }
+}
+
+
+@class_init : {
+    Map properties = new HashMap();
+    List ids = new ArrayList();
+    List functions = new ArrayList();
+}
+@tclass : !
+@class_start : {
+    currentClass = (ASPClass) localClasses.get(#c.getText());
+    if (currentClass == null) {
+        log.error("Failed to locate class:" + #c.getText());
+    }
+}
+
+@tprivmem : !
+@priv_mem : {
+    if (#id != null) {
+        ## = #id;
+    } else {
+        ## = #s;
+    }
+}
+@pmem : {
+    if (#pmem.getType() == IDENTIFIER) {
+        ids.add(#pmem);
+    } else {
+        functions.add(#pmem);
+    }
+}
+@pg_init : {
+    currentFunction = getProperty(#pg.getText(), 0);
+}
+@pget : {
+    addProperty(properties, makeFunction(#pg, #gst), 0);
+}
+
+@pl_init : {
+    currentFunction = getProperty(#pl.getText(), 1);
+}
+@plet : {
+    #pl.addChild(#lst);
+    addProperty(properties, #pl, 1);
+}
+
+@ps_init : {
+    currentFunction = getProperty(#ps.getText(), 2);
+}
+@pset : {
+    #ps.addChild(#sst);
+    makeSub(#ps);
+    addProperty(properties, #ps, 2);
+}
+
+@exit_prop : {
+    if (propType == 0) {
+        ## = exitFunction();
+    } else {
+        ## = #([RETURN, "return"]);
+    }
+}
+
+@cid : {
+    ids.add(#id);
+}
+
+@csub : {
+    functions.add(#subfunc);
+}
+
+@class_end : {
+    currentClass = null;
+    AST lastChild = null;
+    //add members
+    for (Iterator it = ids.iterator(); it.hasNext();) {
+        if (lastChild == null) {
+            lastChild = (AST) it.next();
+            #c.addChild(lastChild);
+        } else {
+            AST next = (AST) it.next();
+            lastChild.setNextSibling(next);
+            lastChild = next;
+        }
+    }
+    //add subs and functions
+    for (Iterator it = functions.iterator(); it.hasNext();) {
+        if (lastChild == null) {
+            lastChild = (AST) it.next();
+            #c.addChild(lastChild);
+        } else {
+            AST next = (AST) it.next();
+            lastChild.setNextSibling(next);
+            lastChild = next;
+        }
+    }
+    //add properties
+    for (Iterator it = properties.values().iterator(); it.hasNext();) {
+        AST[] props = (AST[]) it.next();
+        for (int i = 0; i < 3; i++) {
+            if (props[i] != null) {
+                if (lastChild == null) {
+                    lastChild = props[i];
+                    #c.addChild(lastChild);
+                } else {
+                    lastChild.setNextSibling(props[i]);
+                    lastChild = props[i];
+                }
+            }
+        }
+    }
+    /*
+    log.debug(ids);
+    log.debug(functions);
+    log.debug(properties);
+    */
+    ## = #c;
+}
+
+@index : { typeStack.clear(); }
